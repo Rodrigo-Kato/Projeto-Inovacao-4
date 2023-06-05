@@ -1,0 +1,411 @@
+// All the resources for this project:
+// https://randomnerdtutorials.com/esp8266-and-node-red-with-mqtt/
+
+//===============================================================
+// Wi-Fi e Node-Red
+//===============================================================
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h>
+
+// Change the credentials below, so your ESP8266 connects to your router
+const char* ssid = "raspi-webgui-01";
+const char* password = "raspberrypi";
+
+// Change the variable to your Raspberry Pi IP address, so it connects to your MQTT broker
+const char* mqtt_server = "10.3.141.1";
+
+// Initializes the espClient. You should change the espClient name if you have multiple ESPs running in your home automation system
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+//===============================================================
+// Variáveis globais by Marcel
+//===============================================================
+float Valor = 200.5; // Calculo do valor da região de SP em R$/KWh
+
+//===============================================================
+// Sensor de corrente SCT
+//===============================================================
+const int pino_sct = A0;  // Pino Analogico ADC
+double CorrenteRms = 0;
+unsigned long tempoatual;
+float corrente = 0;
+float correnteRMS=0;
+float correnteMax = 0;
+float correnteMin = 0;
+
+
+//===============================================================
+// Calculo da Potencia Aparente (S) e Ativa (P)
+//===============================================================
+int rede = 127; // Tensao da rede eletrica
+double UltimoS = 0;
+float energia=0;
+unsigned long tempoanterior;
+unsigned long deltat;
+
+
+//===============================================================
+// Calculo da Potencia Aparente (S) e Ativa (P) media
+//===============================================================
+float CorrenteRmsMedia = 0;
+float UltimoCorrenteRmsMedia = 0;
+int nMed_Irms = 0;
+unsigned long timer_Irms = millis();
+
+
+//===============================================================
+// Leitor MFRC522
+//===============================================================
+#include <SPI.h>
+#include <MFRC522.h>
+#define RST_PIN D1 // Pino RST
+#define SS_PIN D2  // Pino SDA
+MFRC522 mfrc522(SS_PIN, RST_PIN); // Cria a instancia MFRC522
+unsigned long timer_rfid = millis();
+String read_rfid;
+String ok_rfid_1 = "66f460e";
+String ok_rfid_2 = "ec0bf79"; // Adicionar quantos cartoes forem necessarios
+
+
+//===============================================================
+// Acionamento do rele/led
+//===============================================================
+#define LedRele D0 // Led vermelho ligado ao pino GPIO16 (D0) do NodeMCU
+#define rele D8 // Pino do rele e Led verde
+int estado_rele = LOW;
+
+
+//===============================================================
+// Don't change the function below. This functions connects your ESP8266 to your router
+//===============================================================
+void setup_wifi() {
+  delay(10);
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.print("WiFi connected - ESP IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+
+//===============================================================
+// This functions is executed when some device publishes a message to a topic that your ESP8266 is subscribed to
+// Change the function below to add logic to your program, so when a device publishes a message to a topic that 
+// your ESP8266 is subscribed you can actually do something
+//===============================================================
+void callback(String topic, byte* message, unsigned int length) {
+  Serial.print("Message arrived on topic: ");
+  Serial.print(topic);
+  Serial.print(". Message: ");
+  String messageTemp;
+  
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)message[i]);
+    messageTemp += (char)message[i];
+  }
+  Serial.println();
+
+  // Feel free to add more if statements to control more GPIOs with MQTT
+
+  // If a message is received on the topic room/lamp, you check if the message is either on or off. Turns the lamp GPIO according to the message
+  if(topic=="garagem/vaga01/controle"){
+      Serial.print("Alterando a lampada para ");
+      if(messageTemp == "troca"){
+        open_lock();
+      }
+//      else if(messageTemp == "on"){
+//        digitalWrite(rele, HIGH);
+//        Serial.print("On");
+//      }
+//      else if(messageTemp == "off"){
+//        digitalWrite(rele, LOW);
+//        Serial.print("Off");
+//      }
+  }
+  Serial.println();
+}
+
+
+//===============================================================
+// This functions reconnects your ESP8266 to your MQTT broker
+// Change the function below if you want to subscribe to more topics with your ESP8266 
+//===============================================================
+void reconnect() {
+  // Loop until we're reconnected
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection... ");
+    // Attempt to connect
+    /*
+     YOU MIGHT NEED TO CHANGE THIS LINE, IF YOU'RE HAVING PROBLEMS WITH MQTT MULTIPLE CONNECTIONS
+     To change the ESP device ID, you will have to give a new name to the ESP8266.
+     Here's how it looks:
+       if (client.connect("ESP8266Client")) {
+     You can do it like this:
+       if (client.connect("ESP1_Office")) {
+     Then, for the other ESP:
+       if (client.connect("ESP2_Garage")) {
+      That should solve your MQTT multiple connections problem
+    */
+    if (client.connect("ESP8266Client")) {
+      Serial.println("connected");  
+      // Subscribe or resubscribe to a topic
+      // You can subscribe to more topics (to control more LEDs in this example)
+      client.subscribe("garagem/vaga01/controle");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+
+
+//===============================================================
+// Leitura da corrente RMS
+//===============================================================
+float Irms() {
+  // Leitura da Corrente
+  float soma = 0;
+  float nMedio = 0;
+  float amostras[10000]; 
+  float produto[10000]; 
+
+  // Leitura de 1 periodo
+  int i = 1;
+  tempoatual = micros();
+  while(micros() - tempoatual < 16667) {
+      corrente = ((analogRead(pino_sct) - 512) / 1024.0 * 3.3 / 10.0 / 20.0 * 2000.0); // SCT013 100A:50mA, R = 20 Ohm e 10 voltas de fio
+    //corrente = ((analogRead(pino_sct) - 512) / 1024.0 * 3.3 / 20.0 * 2000.0);        // SCT013 100A:50mA, R = 20 Ohm e fio sem voltas
+    //corrente = ((analogRead(pino_sct) - 512) / 1024.0 * 3.3 * 20.0);                 // SCT013 20A/1V, sem resistor e fio sem voltas
+    //corrente = ((analogRead(pino_sct) - 512) / 1024.0 * 3.3 * 30.0);                 // SCT013 30A/1V, sem resistor e fio sem voltas
+    amostras[i] = corrente;
+    i++;
+  }
+
+  // Calcula o nivel medio
+  correnteMax = 0.0;
+  correnteMin = 3.3;
+  for(int n = 1; n < i; n++) {
+    if(amostras[n] > correnteMax) {
+      correnteMax = amostras[n];
+    }
+    if(amostras[n] < correnteMin) {
+      correnteMin = amostras[n];
+    }
+  }
+  nMedio = (correnteMin + correnteMax) / 2.0;
+
+  // Remove o nivel medio e faz o somatorio das amostras ao quadrado
+  for(int n = 1; n < i; n++) {
+    amostras[n] = amostras[n] - nMedio; // Remove nivel medio
+    produto[n] = amostras[n] * amostras[n];
+    soma += produto[n];
+  }
+
+  // Calcula a media dos valores
+  correnteRMS = soma / i;
+  // Calcula a raiz quadrada
+  correnteRMS = sqrt(correnteRMS);
+  
+  // Caso o rele esteja desligado, forca o valor de Irms para 0A
+  if(!estado_rele) {
+    correnteRMS = 0;
+  }
+
+  return correnteRMS;
+}
+
+
+//===============================================================
+// Calculo da potAparente em kVA
+//===============================================================
+float potAparente() {
+  return UltimoS = Irms() * rede / 1000.0;
+}
+
+
+//===============================================================
+// Calcula a potencia em kW considerando FP = 0.8
+//===============================================================
+float potAtiva() {
+  return (potAparente() * 0.8);
+}
+
+
+//===============================================================
+// Calcula o consumo de energia em kWh
+//===============================================================
+float Consumo() {
+  tempoatual = millis();
+  deltat = tempoatual - tempoanterior;
+  tempoanterior = tempoatual;
+  return energia += (potAtiva() * deltat) / 3600.0 / 1000.0;
+}
+
+//===============================================================
+// Billing by Marcel
+//===============================================================
+float Cobrança() {
+  return ((potAtiva() * deltat) / 3600.0 / 1000.0)*Valor; //calcula e guarda o valor do consumo em reais
+}
+
+//===============================================================
+// Media dos ultimos 5s da Irms
+//===============================================================
+float Irms_5s() {
+  if((millis() - timer_Irms) < 5000) {
+    CorrenteRmsMedia += Irms();
+    nMed_Irms++;
+  }
+  else {
+    CorrenteRmsMedia = CorrenteRmsMedia / nMed_Irms;
+    UltimoCorrenteRmsMedia = CorrenteRmsMedia;
+    // Reinicia os contadores
+    CorrenteRmsMedia = 0;
+    nMed_Irms = 0;
+    timer_Irms = millis();
+  }
+  return UltimoCorrenteRmsMedia;
+}
+
+
+//===============================================================
+// Leitura do RFID
+//===============================================================
+void dump_byte_array(byte *buffer, byte bufferSize) {
+  read_rfid = "";
+  for (byte i = 0; i < bufferSize; i++) {
+    read_rfid = read_rfid + String(buffer[i], HEX);
+  }
+}
+void open_lock() {
+  // if rfid is good this is what will happen
+  estado_rele = !estado_rele;
+  digitalWrite(rele, estado_rele);
+  if(estado_rele) {
+    digitalWrite(LedRele,LOW);
+    Serial.println("Sistema liberado\n");
+    client.publish("garagem/vaga01/estado", "Sistema liberado");
+  }
+  else {
+    digitalWrite(LedRele,HIGH);
+    Serial.println("Sistema bloqueado\n");
+    client.publish("garagem/vaga01/estado", "Sistema bloqueado");
+  }
+}
+void leitura_rfid() {
+  if((millis() - timer_rfid) > 1000) {
+    // Bloqueia para novos cartoes
+    if (!mfrc522.PICC_IsNewCardPresent())
+      return;
+    // Seleciona um dos cartoes
+    if (!mfrc522.PICC_ReadCardSerial())
+      return;
+
+    dump_byte_array(mfrc522.uid.uidByte, mfrc522.uid.size);
+    Serial.print("\nNumero ID do cartao identificado (hex): ");
+    Serial.println(read_rfid);
+    
+    if (read_rfid == ok_rfid_1) { // RFID #1
+      // Libere o sistema:
+      open_lock();
+    }
+    if (read_rfid == ok_rfid_2) { // RFID #2
+      // Libere o sistema:
+      open_lock();
+    }
+    if (read_rfid != ok_rfid_1 && read_rfid != ok_rfid_2) {
+      digitalWrite(LedRele,HIGH);
+      Serial.print("Cadastro nao encontrado.\n");
+    }
+    timer_rfid = millis();
+  }
+}
+
+
+//===============================================================
+// Setup
+// The setup function sets your ESP GPIOs to Outputs, starts the serial communication at a baud rate of 115200
+// Sets your mqtt broker and sets the callback function
+// The callback function is what receives messages and actually controls the LEDs
+//===============================================================
+void setup() {
+  Serial.begin(115200);
+  delay(500);                                       // INTERVALO DE 500 MILISEGUNDOS
+
+  // WiFi
+  setup_wifi();
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
+  
+  // Leitor MFRC522
+  SPI.begin();                                      // Inicia o barramento SPI
+  mfrc522.PCD_Init();                               // Inicia a placa MFRC522
+  Serial.println("Sistema bloqueado. Aguardando cartao para leitura...\n");
+
+  // Acionamento do rele/led
+  pinMode(LedRele, OUTPUT);
+  pinMode(rele, OUTPUT);
+  digitalWrite(LedRele,HIGH);
+  digitalWrite(rele,LOW);
+}
+
+
+//===============================================================
+// Setup
+// For this project, you don't need to change anything in the loop function. Basically it ensures that you ESP is connected to your broker
+//===============================================================
+void loop() {
+  //==================================
+  // Wi-Fi
+  if (!client.connected()) {
+    reconnect();
+  }
+  if(!client.loop())
+    client.connect("ESP8266Client");
+
+  //==================================
+  // Leitura do RFID
+  leitura_rfid();
+
+  //==================================
+  // Leitura da Corrente RMS e Potencias
+  if(estado_rele) {
+    // Atualiza o Node-Red
+    static char corrente_rms[7];
+    dtostrf(Irms(), 6, 2, corrente_rms);
+    client.publish("N640/vaga03/corrente_rms", corrente_rms);
+    static char pot_ativa[7];
+    dtostrf(potAtiva(), 6, 2, pot_ativa);
+    client.publish("N640/vaga03/pot_ativa", pot_ativa);
+    static char consumo[7];
+    dtostrf(Consumo(), 6, 2, consumo);
+    client.publish("N640/vaga03/consumo", consumo);
+    static char cobrança[7]; //modulo adicional para visualização no Node-Red
+    dtostrf(Cobrança(), 6, 2, cobrança);
+    client.publish("N640/vaga03/cobrança", cobrança);
+    
+    // Mostra o valor da corrente no serial monitor
+    Serial.print("Corrente RMS (A): ");
+    Serial.print(Irms(),3);
+    Serial.print("\tPotencia Aparente (kVA): ");
+    Serial.print(potAparente(),3);
+    Serial.print("\tPotencia Ativa (FP=0.8 - kW): ");
+    Serial.print(potAtiva(),3);
+    Serial.print("\tConsumo de Energia (FP=0.8 - kWh): ");
+    Serial.print(Consumo(),6);
+    Serial.print("\tCobrança (R$): ");//modulo adicional para visualização no Node-Red
+    Serial.print(Cobrança(),6);
+    Serial.println("");
+  }
+}
