@@ -1,0 +1,17 @@
+int analogPin = 34; // Define o pino analógico
+int analogValue = 0; // Define a variável de leitura do valor analógico
+
+void setup() {
+  Serial.begin(9600); // Inicializa a comunicação serial
+}
+
+void loop() {
+  analogValue = analogRead(analogPin); // Lê o valor analógico no pino definido
+  if (analogValue > 500 && analogValue < 530) { // Verifica se o valor está dentro do intervalo esperado
+    Serial.println("Sinal válido"); // Imprime "Sinal válido" na comunicação serial
+    // Coloque aqui o código que deseja executar após receber a confirmação de um sinal válido
+  } else {
+    Serial.println("Sinal inválido"); // Imprime "Sinal inválido" na comunicação serial
+  }
+  delay(1000); // Aguarda 1 segundo antes de iniciar a próxima leitura
+}
